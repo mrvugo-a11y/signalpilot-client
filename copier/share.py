@@ -1,6 +1,7 @@
 """Crowd ranking: sends per channel results (never account details) to the SignalPilot server.
 Only these fields leave the computer: channel id, title, username, trades, wins, losses, net R (and how many
-trades had a stop loss so R is known), net pips, profit as a percent, first and last trade date."""
+trades had a stop loss so R is known), net pips, profit as a percent, first and last trade date, and per symbol the summed price move and trade count
+(so the server can work out pips with its own pip table)."""
 import json, time, urllib.request
 from datetime import datetime
 from . import config as C, results as R, mt5hist as H
@@ -8,7 +9,7 @@ from . import config as C, results as R, mt5hist as H
 INTERVAL = 3600
 FIRST_DELAY = 120     # first upload two minutes after copying starts, not an hour later
 FIELDS = ("id", "title", "username", "trades", "wins", "losses", "net_r", "r_trades", "net_pips",
-          "profit_pct", "first_trade", "last_trade")
+          "profit_pct", "first_trade", "last_trade", "pip_moves")
 
 
 def endpoint(cfg):
@@ -64,7 +65,7 @@ def channel_stats(deals, tickets, sls, names, usernames, balance, symbol_info):
     for pid, p in pos.items():
         if not p["closed"] or p["chat"] is None: continue
         c = rows.setdefault(str(p["chat"]), {"id": str(p["chat"]), "trades": 0, "wins": 0, "losses": 0, "net_r": 0.0,
-                                            "r_trades": 0, "net_pips": 0.0, "money": 0.0, "first": None, "last": 0})
+                                            "r_trades": 0, "net_pips": 0.0, "money": 0.0, "first": None, "last": 0, "moves": {}})
         m = round(p["money"], 2)
         c["trades"] += 1; c["money"] += m
         if m > 0: c["wins"] += 1
@@ -75,6 +76,8 @@ def channel_stats(deals, tickets, sls, names, usernames, balance, symbol_info):
             move = p["side"] * (p["out_px"] / p["out_vol"] - p["entry"])
             pip = _pip(symbol_info(p["symbol"])) if p["symbol"] else None
             if pip: c["net_pips"] += move / pip
+            if p["symbol"]:
+                mv = c["moves"].setdefault(str(p["symbol"]), [0.0, 0]); mv[0] += move; mv[1] += 1
             sl = next((sls[t] for t in p.get("tickets", ()) if t in sls), None)
             if sl and abs(p["entry"] - sl) > 0:
                 c["net_r"] += move / abs(p["entry"] - sl); c["r_trades"] += 1
@@ -86,7 +89,8 @@ def channel_stats(deals, tickets, sls, names, usernames, balance, symbol_info):
                     "username": usernames.get(c["id"]), "trades": c["trades"], "wins": c["wins"], "losses": c["losses"],
                     "net_r": round(c["net_r"], 2), "r_trades": c["r_trades"], "net_pips": round(c["net_pips"], 1),
                     "profit_pct": round(100.0 * c["money"] / balance, 2) if balance else None,
-                    "first_trade": day(c["first"]), "last_trade": day(c["last"])})
+                    "first_trade": day(c["first"]), "last_trade": day(c["last"]),
+                    "pip_moves": {k: [round(v[0], 6), v[1]] for k, v in c["moves"].items()}})
     return out
 
 

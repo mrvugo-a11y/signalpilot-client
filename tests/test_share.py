@@ -30,6 +30,13 @@ class Stats(unittest.TestCase):
         self.assertTrue(g["first_trade"] <= g["last_trade"])
         self.assertEqual((a["-1002"]["title"], a["-1002"]["r_trades"]), (None, 0))
 
+    def test_pip_moves_per_symbol(self):
+        # 1.3.16: summed price move and trade count per symbol, so the server can use its own pip table
+        a = {r["id"]: r for r in self.rows()}
+        self.assertEqual(a["-1001"]["pip_moves"], {"EURUSD": [0.001, 2]})
+        self.assertEqual(a["-1002"]["pip_moves"], {"EURUSD": [0.1, 1]})
+        self.assertEqual(SH.payload(CFG, self.rows())["channels"][0]["pip_moves"], a[SH.payload(CFG, self.rows())["channels"][0]["id"]]["pip_moves"])
+
     def test_payload_has_no_account_details(self):
         body = json.dumps(SH.payload(CFG, self.rows()))
         for bad in ("secret", "123", "balance", "mt5", "+27", "telegram"):
