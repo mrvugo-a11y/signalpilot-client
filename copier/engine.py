@@ -1,7 +1,8 @@
 """Telegram listener: ties the parser, the ticket store and the MT5 executor together."""
-import asyncio, os, threading, time
+import asyncio, datetime, os, threading, time
 from . import config as C
-from .parser import parse, parse_command, parse_update, parse_signal, is_ru_info, Signal, Command
+from .parser import (parse, parse_command, parse_update, parse_signal, parse_bare_call, is_status, is_ru_info,
+                     normalise, SIDE_RE, Signal, Command)
 from .store import Store
 from .executor import Executor
 from . import share as SH
@@ -264,6 +265,21 @@ def _reply_may_open(msg, sig):
     return sig.sl is not None or bool(sig.tps)
 
 
+def message_time(msg, edited=False):
+    """Unix time the message was posted in the watched chat (for an edit: when it was edited).
+    For a forwarded message this is the time it was forwarded into the channel, not the original post time
+    (Telegram keeps that one separately in fwd_from). None when unknown."""
+    d = (getattr(msg, "edit_date", None) if edited else None) or getattr(msg, "date", None)
+    if not isinstance(d, datetime.datetime): return None
+    if d.tzinfo is None: d = d.replace(tzinfo=datetime.timezone.utc)
+    return d.timestamp()
+
+
+def _minutes(sec):
+    m = int(sec // 60)
+    return "1 minute" if m == 1 else f"{m} minutes"
+
+
 class Engine:
     def __init__(self, log, ask, status=lambda kind, ok, text: None):
         self.log, self.ask, self.status = log, ask, status
@@ -339,6 +355,7 @@ class Engine:
             self._last_share = SH.first_due(time.monotonic())
             while not self.stop_event.wait(5):
                 self._check_break_even()
+                self._expire_waiting()
                 if time.monotonic() - self._last_share >= SH.INTERVAL:
                     self._last_share = time.monotonic(); self._share_results()
                 if not self.client.is_connected():      # network dropped: reconnect the same client
@@ -357,7 +374,62 @@ class Engine:
     def _name(self, chat_id):
         return self.cfg["channels"].get(str(chat_id), {}).get("name", str(chat_id))
 
-    def _open(self, chat_id, msg_id, sig, st, parent_id=None):
+    # -- signals without a stop loss: wait for the same channel to send the numbers --
+    def _wait_minutes(self, st):
+        try: return max(0, float(st.get("wait_for_sl_minutes", 15) or 0))
+        except (TypeError, ValueError): return 15
+
+    def _remember(self, chat_id, msg_id, sig, st, posted=None):
+        if not hasattr(self, "_waiting"): self._waiting = {}
+        self._waiting[str(chat_id)] = {"sig": sig, "msg_id": msg_id, "at": posted or time.time(),
+                                       "minutes": self._wait_minutes(st)}
+        self.log(f"[{self._name(chat_id)}] Waiting for {self._name(chat_id)} to send the stop loss and take profit for "
+                 f"{sig.side} {sig.symbol}. Nothing is opened until then (up to {self._wait_minutes(st):.0f} minutes).")
+
+    def _waiting_for(self, chat_id):
+        w = getattr(self, "_waiting", {}).get(str(chat_id))
+        if w and time.time() - w["at"] > w["minutes"] * 60:
+            self._waiting.pop(str(chat_id), None)
+            self.log(f"[{self._name(chat_id)}] Stopped waiting: no stop loss came for {w['sig'].side} {w['sig'].symbol} "
+                     f"within {w['minutes']:.0f} minutes, so it was not copied.")
+            return None
+        return w
+
+    def _expire_waiting(self):
+        for chat in list(getattr(self, "_waiting", {})): self._waiting_for(chat)
+
+    def _complete(self, w, text):
+        """The follow up message holds the numbers for a remembered call. Returns a Signal or None.
+        At least a stop loss is needed; status and result messages never complete a call."""
+        if not text or is_status(text): return None
+        upd = parse_update(text)
+        if not upd or upd.sl is None: return None
+        ws = w["sig"]
+        own_side = SIDE_RE.search(normalise(text))
+        sig = parse_signal(f"{ws.symbol}\n{'' if own_side else ws.side}\n{text}")
+        if not sig or sig.sl is None:
+            sig = Signal(side=ws.side, symbol=ws.symbol, order_type=ws.order_type, entry=ws.entry,
+                         entry_high=ws.entry_high, sl=upd.sl, tps=list(upd.tps))
+        if not sig.tps and ws.tps: sig.tps = list(ws.tps)
+        if sig.entry is None and ws.entry is not None: sig.entry, sig.entry_high = ws.entry, ws.entry_high
+        return sig
+
+    def _too_old(self, chat_id, msg, st, what, edited=False):
+        """True (and logged) when the message was sent longer ago than the customer's limit."""
+        try: lim = float(st.get("max_signal_age_minutes", 5) or 0)
+        except (TypeError, ValueError): lim = 5
+        t = message_time(msg, edited)
+        if not lim or t is None: return False
+        age = time.time() - t
+        if age <= lim * 60: return False
+        self.log(f"[{self._name(chat_id)}] Skipped an old {what} from {self._name(chat_id)} sent {_minutes(age)} ago. "
+                 f"Your limit is {lim:.0f} minutes.")
+        return True
+
+    def _open(self, chat_id, msg_id, sig, st, parent_id=None, posted=None):
+        if sig.sl is None and self._wait_minutes(st):
+            self._remember(chat_id, msg_id, sig, st, posted); return
+        getattr(self, "_waiting", {}).pop(str(chat_id), None)   # a full signal replaces any call we were waiting on
         tid = getattr(sig, "trade_id", None)
         if tid and self.store.has_trade(chat_id, tid):
             self.log(f"[{self._name(chat_id)}] trade #{tid} was already copied, ignoring repost"); return
@@ -461,6 +533,11 @@ class Engine:
             reply_id = ev.message.reply_to_msg_id
             text = _strip_quote(ev.message, text)
             parsed = parse(text)
+            posted = message_time(ev.message)
+            bare = parse_bare_call(text) if parsed is None and not _cross_chat(ev.message) else None
+            if parsed is not None or bare or parse_update(text):
+                what = "signal" if isinstance(parsed, Signal) or bare else "message"
+                if self._too_old(chat, ev.message, st, what): return   # reconnect replays and late messages
             if reply_id and isinstance(parsed, Signal) and not _reply_may_open(ev.message, parsed):
                 parsed = None   # a reply only opens when it holds its own full signal, never from a quote
             if reply_id and isinstance(parsed, Signal) and self.store.get(chat, reply_id):
@@ -470,7 +547,15 @@ class Engine:
                 self.log(f"[{self._name(chat)}] SIGNAL received: {parsed.side} {parsed.symbol}"
                          f"{' ' + parsed.order_type if parsed.order_type and parsed.order_type.upper() != 'MARKET' else ''}, entry {parsed.entry or 'now'}"
                          f"{' to ' + str(parsed.entry_high) if parsed.entry_high else ''}, stop loss {parsed.sl or 'none'}, take profits {', '.join(map(str, parsed.tps)) or 'none'}")
-                self._open(chat, ev.id, parsed, st); return
+                self._open(chat, ev.id, parsed, st, posted=posted); return
+            w = self._waiting_for(chat) if parsed is None and not _cross_chat(ev.message) else None
+            if w and (not reply_id or reply_id == w["msg_id"]):
+                sig = self._complete(w, text)
+                if sig:
+                    self._log_signal(chat, sig, "follow up message gives the stop loss")
+                    self._open(chat, ev.id, sig, st, parent_id=w["msg_id"]); return
+            if bare and self._wait_minutes(st):
+                self._remember(chat, ev.id, bare, st, posted); return
             if reply_id:
                 if parsed is None and not _cross_chat(ev.message):
                     sig = await self._signal_from_reply(ev, chat, reply_id, text)
@@ -492,13 +577,20 @@ class Engine:
             text = _strip_quote(ev.message, ev.raw_text or "")
             rec = self.store.get(chat, ev.id)
             parsed = parse(text)
+            if (parsed is not None or parse_update(text)) and self._too_old(chat, ev.message, st, "edited message", edited=True):
+                return
             if rec is None and getattr(ev.message, "reply_to_msg_id", None) and isinstance(parsed, Signal) \
                     and not _reply_may_open(ev.message, parsed):
                 parsed = None
             if rec is None:
+                w = self._waiting_for(chat) if not _cross_chat(ev.message) else None
                 if isinstance(parsed, Signal):      # signal completed by an edit
                     self.log(f"[{self._name(chat)}] edited message is now a signal")
-                    self._open(chat, ev.id, parsed, st)
+                    self._open(chat, ev.id, parsed, st, posted=message_time(ev.message, True))
+                elif parsed is None and w and ev.id == w["msg_id"] and self._complete(w, text):
+                    sig = self._complete(w, text)        # the call we were waiting on was edited to add the numbers
+                    self._log_signal(chat, sig, "edited call now gives the stop loss")
+                    self._open(chat, ev.id, sig, st)
                 elif parsed is None and getattr(ev.message, "reply_to_msg_id", None) and not _cross_chat(ev.message):
                     sig = await self._signal_from_reply(ev, chat, ev.message.reply_to_msg_id, text)
                     if sig:                          # an edited reply now holds the full signal

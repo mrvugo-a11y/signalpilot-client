@@ -13,7 +13,13 @@ TRADE_FIELDS = [
     ("risk_percent", "Risk per signal (percent)", "float", None,
      "For example 1 means risk 1 percent of your balance on the whole signal, shared over all its trades. Needs a stop loss."),
     ("default_sl_points", "Stop loss when the signal has none (points)", "int", None,
-     "Used only when a signal comes without a stop loss. 0 means no stop loss."),
+     "Used only when a signal comes without a stop loss and waiting for the stop loss below is set to 0. 0 means no stop loss."),
+    ("wait_for_sl_minutes", "Wait for the stop loss (minutes)", "int", None,
+     "A signal like BUY GOLD NOW without a stop loss is not copied. The copier waits this many minutes for the same channel "
+     "to send the stop loss, then opens the trade. 0 means signals without a stop loss open straight away like before."),
+    ("max_signal_age_minutes", "Ignore signals older than (minutes)", "int", None,
+     "Messages that arrive late, for example after your internet or Telegram was disconnected, are not copied when they "
+     "were sent longer ago than this. 0 turns this check off."),
     ("split_tps", "Open one trade per take profit", "bool", None,
      "Ticked: TP1, TP2, TP3 each get their own trade. Unticked: one trade that uses TP1."),
     ("use_tps", "Take profits to use", "tps", None,
@@ -139,7 +145,8 @@ def validate_trade_settings(s):
         probs.append("Fixed lot size must be above 0.")
     if s.get("lot_mode") == "risk" and not (0 < s.get("risk_percent", 0) <= 100):
         probs.append("Risk per signal must be between 0 and 100.")
-    for k in ("max_spread_points", "default_sl_points", "max_open_trades", "slippage_points", "max_entry_distance_points"):
+    for k in ("max_spread_points", "default_sl_points", "max_open_trades", "slippage_points", "max_entry_distance_points",
+              "max_signal_age_minutes", "wait_for_sl_minutes"):
         if s.get(k, 0) < 0: probs.append(f"{label_of(k)} cannot be negative.")
     return probs
 

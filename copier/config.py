@@ -12,6 +12,7 @@ DEFAULT_SETTINGS = {
     "max_entry_distance_points": 0, "reverse_signals": False, "tp_hit_action": "none", "be_after_tp1": False,
     "commands_without_reply_apply_to_last": True, "follow_edits": True,
     "max_open_trades": 20, "slippage_points": 20, "comment": "TGCopier",
+    "max_signal_age_minutes": 5, "wait_for_sl_minutes": 15,
 }
 DEFAULTS = {
     "licence_key": "", "licence_url": "",

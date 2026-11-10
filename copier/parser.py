@@ -106,6 +106,8 @@ def normalise(text: str) -> str:
     t = re.sub(r"[^\x00-\x7F]+", " ", t)          # strip emojis
     t = t.replace("TAKE PROFIT", "TP").replace("TAKEPROFIT", "TP").replace("T/P", "TP")
     t = re.sub(r"STOP\s*-?\s*LOSS|S/L|\bSTOPLOSS\b", "SL", t)
+    # "TP1. 4151.00" / "SL. 4121.00": a dot used as the separator (only when a space follows, so TP1.0850 is untouched)
+    t = re.sub(r"\b(TP\s*\d{0,2}|SL)\s*\.(?=\s+\d)", r"\1:", t)
     t = re.sub(r"\bTARGET\s*(\d)", r"TP\1", t)
     t = re.sub(r"\bTARGETS?\b", "TP", t)
     return t
@@ -223,6 +225,37 @@ def parse(text: str) -> Optional[Union[Signal, Command]]:
     if s:
         return s
     return parse_command(text)
+
+
+BARE_MAX_WORDS = 12
+
+
+def parse_bare_call(text: str) -> Optional[Signal]:
+    """A short call without numbers, like 'BUY XAUUSD NOW' or 'sell gold now'. Returns a Signal holding only
+    the side and symbol (never opened on its own: the copier waits for the stop loss), or None."""
+    if not text or not text.strip() or is_ru_info(text):
+        return None
+    t = normalise(text)
+    if len(t.split()) > BARE_MAX_WORDS or STATUS_RE.search(t) or is_outcome(t):
+        return None
+    if parse_signal(text) or parse_command(text):
+        return None
+    sm = SIDE_RE.search(t)
+    if not sm:
+        return None
+    symbol = find_symbol(t)
+    if not symbol:
+        return None
+    sl, tps = _sl_tps(t)
+    if sl is not None or tps:
+        return None
+    return Signal(side="BUY" if sm.group(1) in ("BUY", "LONG") else "SELL", symbol=symbol, order_type=sm.group(2) or "MARKET")
+
+
+def is_status(text: str) -> bool:
+    """Result or status message (TP hit, SL hit, running in profit, activated): never opens a trade."""
+    t = normalise(text or "")
+    return bool(STATUS_RE.search(t) or is_outcome(t) or SL_RESULT_RE.search(t) or is_ru_info(text or ""))
 
 
 def parse_update(text: str) -> Optional[Command]:

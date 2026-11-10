@@ -155,7 +155,28 @@ class Executor:
                 price = None
         if otype in ("LIMIT", "STOP") and not st.get("pending_orders", True):
             self.log("Skipped a limit or stop order, because pending orders are switched off in Settings."); return []
-        if otype == "MARKET": price = None
+        if otype == "MARKET" or price is None:          # a limit or stop order without a price cannot be placed
+            otype, price = "MARKET", None
+
+        # the broker refuses stops and pending prices closer to the market than its stop level (codes 10015, 10016)
+        need = max(getattr(info, "trade_stops_level", 0) or 0, getattr(info, "trade_freeze_level", 0) or 0) * pt
+        bid, ask = tick.bid, tick.ask
+        label = f"{side} {symbol}"
+        if otype in ("LIMIT", "STOP") and price is not None:
+            ok = {("BUY", "LIMIT"): price < ask - need, ("BUY", "STOP"): price > ask + need,
+                  ("SELL", "LIMIT"): price > bid + need, ("SELL", "STOP"): price < bid - need}[(side, otype)]
+            if not ok:
+                better = (side == "BUY" and ask <= price) or (side == "SELL" and bid >= price)
+                maxd = float(st.get("max_entry_distance_points", 0) or 0)
+                dist = abs(market - price) / pt
+                if better or not maxd or dist <= maxd:
+                    self.log(f"{label}: the {otype.lower()} price {price} is already reached or too close to the market "
+                             f"({bid} / {ask}), entering at the market price instead.")
+                    otype, price = "MARKET", None
+                else:
+                    self.log(f"Skipped {label}: the {otype.lower()} price {price} is on the wrong side of the market "
+                             f"({bid} / {ask}) and the price is {dist:.0f} points away, more than your limit of {maxd:.0f}.")
+                    return []
         ref = price if price is not None else market
 
         sl = sig.sl
@@ -166,8 +187,26 @@ class Executor:
         if not sl and st.get("default_sl_points"):
             d = float(st["default_sl_points"]) * pt
             sl = ref - d if side == "BUY" else ref + d
+        # a market order is checked against bid and ask, a pending order against its own price
+        lo_ref = bid if price is None else price          # where a BUY stop loss must stay below
+        hi_ref = ask if price is None else price          # where a SELL stop loss must stay above
+        if sl:
+            if side == "BUY" and not sl < lo_ref - need:
+                self.log(f"Skipped {label}: the stop loss {sl} is already hit or too close to the price {lo_ref}."); return []
+            if side == "SELL" and not sl > hi_ref + need:
+                self.log(f"Skipped {label}: the stop loss {sl} is already hit or too close to the price {hi_ref}."); return []
         use = st.get("use_tps", [1, 2, 3, 4, 5])
         chosen = [tp for i, tp in enumerate(tps, 1) if i in use] or tps[:1]
+        tp_ok = lambda tp: tp is None or (tp > (ask if price is None else price) + need if side == "BUY"
+                                          else tp < (bid if price is None else price) - need)
+        passed = [tp for tp in chosen if not tp_ok(tp)]
+        if passed:
+            chosen = [tp for tp in chosen if tp_ok(tp)]
+            if not chosen:
+                self.log(f"Skipped {label}: the price {market} is already past every take profit "
+                         f"({', '.join(map(str, passed))})."); return []
+            self.log(f"{label}: take profit {', '.join(map(str, passed))} already reached, "
+                     f"copying the remaining take profits {', '.join(str(t) for t in chosen if t is not None) or 'none'}.")
         if not st.get("split_tps", True):
             chosen = chosen[:1]
         lots = self._lot(symbol, info, side, ref, sl, len(chosen), st)
@@ -184,8 +223,8 @@ class Executor:
                    "price": round(ref, digits), "deviation": int(st.get("slippage_points", 20)),
                    "magic": int(st.get("magic_number", 0)), "comment": f"{st.get('comment','TGC')} TP{i}"[:31],
                    "type_time": mt5.ORDER_TIME_GTC, "type_filling": self._filling(info)}
-            if sl: req["sl"] = round(sl, digits)
-            if tp: req["tp"] = round(tp, digits)
+            if sl: req["sl"] = round(self._norm(sl, info), digits)
+            if tp: req["tp"] = round(self._norm(tp, info), digits)
             r = self._send(req)
             if r:
                 t = r.order or r.deal
