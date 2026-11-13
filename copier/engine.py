@@ -6,6 +6,9 @@ from .parser import (parse, parse_command, parse_update, parse_signal, parse_bar
 from .store import Store
 from .executor import Executor
 from . import share as SH
+from . import tracker as TR
+
+TRACK_EVERY = 60          # seconds between paper tracker price checks
 
 
 def session_path():
@@ -280,6 +283,11 @@ def _minutes(sec):
     return "1 minute" if m == 1 else f"{m} minutes"
 
 
+def _tracked(eng, chat):
+    """True for a followed channel that is tracked on paper instead of copied."""
+    return str(chat) in (getattr(eng, "tracked", None) or {})
+
+
 class Engine:
     def __init__(self, log, ask, status=lambda kind, ok, text: None):
         self.log, self.ask, self.status = log, ask, status
@@ -302,7 +310,82 @@ class Engine:
         if getattr(self, "ex", None): self.ex.cfg = cfg
 
     def channel_ids(self):
-        return sorted(k for k, v in self.cfg.get("channels", {}).items() if v.get("enabled", True)) if getattr(self, "cfg", None) else []
+        """What the running copier listens to; a change means a restart. Copied channels, channels kept for
+        tracking only, and whether every other followed channel is tracked."""
+        if not getattr(self, "cfg", None): return []
+        chans = self.cfg.get("channels", {})
+        out = sorted(k for k, v in chans.items() if v.get("enabled", True))
+        out += sorted("track:" + k for k, v in chans.items() if not v.get("enabled", True) and v.get("track", True))
+        out += sorted("notrack:" + k for k, v in chans.items() if v.get("track", True) is False)
+        if self.cfg.get("track_followed", True): out.append("track_followed")
+        return out
+
+    # -- paper tracking of followed channels that are not copied (never sends orders) --
+    def _tracking(self, chat):
+        return str(chat) in getattr(self, "tracked", {})
+
+    def _rec(self, chat, msg):
+        """The copied trades or the paper tracker that belongs to a message."""
+        if msg is None: return None
+        return self.tracker.get(chat, msg) if _tracked(self, chat) else self.store.get(chat, msg)
+
+    def _last(self, chat):
+        return self.tracker.last_id(chat) if _tracked(self, chat) else self.store.last_id(chat)
+
+    def _market(self):
+        from .executor import mt5
+        if mt5 is None: return None
+        return TR.Market(mt5, lambda sym, st: self.ex.resolve_symbol(sym, st))
+
+    def _track_open(self, chat_id, msg_id, sig, st, parent_id=None, posted=None):
+        tid = getattr(sig, "trade_id", None)
+        if tid and self.tracker.has_trade(chat_id, tid):
+            self.log(f"[{self._name(chat_id)}] trade #{tid} is already tracked, ignoring repost"); return
+        try:
+            with self.mt5_lock:
+                rec = self.tracker.add(self._market(), chat_id, msg_id, sig, st, self._name(chat_id), posted)
+        except Exception as e:
+            self.log(f"[{self._name(chat_id)}] Could not start pip tracking: {e}"); return
+        if not rec: return
+        if parent_id: self.tracker.alias(chat_id, parent_id, msg_id)
+        if rec["state"] == "done":
+            self.log(f"[{self._name(chat_id)}] Not tracked: {TR.OUTCOME_TEXT.get(rec['outcome'], rec['outcome'])}.")
+        else:
+            how = f"from {rec['fill']}" if rec["state"] == "open" else f"once the price reaches {rec['pending_price']}"
+            self.log(f"[{self._name(chat_id)}] Tracking pips for {rec['side']} {rec['broker']} {how}. "
+                     f"Copying is off for this channel, so no trade is opened.")
+
+    def _track_update(self):
+        try:
+            if not self.tracker.active(): return
+            with self.mt5_lock:
+                before = {r["key"]: r.get("outcome") for r in self.tracker.active()}
+                self.tracker.update(self._market())
+            for k, old in before.items():
+                r = self.tracker.data["signals"].get(k)
+                if r and r.get("outcome") in TR.COUNTED and old != r["outcome"]:
+                    self.log(f"[{self._name(r['chat'])}] Tracked {r['side']} {r['broker']}: {TR.OUTCOME_TEXT[r['outcome']]}, "
+                             f"{r['pips']:+.1f} pips (tracked, not copied)" if r.get("pips") is not None else
+                             f"[{self._name(r['chat'])}] Tracked {r['side']} {r['broker']}: {TR.OUTCOME_TEXT[r['outcome']]}")
+        except Exception as e:
+            self.log(f"Pip tracking check failed: {e}")
+
+    async def _followed_channels(self, client, copied):
+        """Every channel and group the customer follows on Telegram that is not copied (and not switched off)."""
+        out = {}
+        chans = self.cfg.get("channels", {})
+        for k, v in chans.items():
+            if not v.get("enabled", True) and v.get("track", True): out[str(k)] = v.get("name") or str(k)
+        if self.cfg.get("track_followed", True):
+            try:
+                async for d in client.iter_dialogs():
+                    k = str(d.id)
+                    if not getattr(d, "is_channel", False) or k in copied: continue
+                    if chans.get(k, {}).get("track", True) is False: continue
+                    out.setdefault(k, d.name or k)
+            except Exception as e:
+                self.log(f"Could not list your followed channels for pip tracking: {friendly_error(e)}")
+        return out
 
     def running(self):
         return self.thread is not None and self.thread.is_alive()
@@ -321,9 +404,11 @@ class Engine:
     def _main(self):
         self.cfg = C.load()
         chans = {k: v for k, v in self.cfg.get("channels", {}).items() if v.get("enabled", True)}
-        if not chans:
+        some_tracked = any(not v.get("enabled", True) and v.get("track", True) for v in self.cfg.get("channels", {}).values())
+        if not chans and not some_tracked and not self.cfg.get("track_followed", True):
             raise RuntimeError("No channels are ticked. Click Channels and tick at least one.")
         self.store = Store()
+        self.tracker = TR.Tracker(log=self.log); self.tracked = {}
         try:                                       # remember every known channel title for Channel results
             self.store.set_names({k: v.get("name") for k, v in self.cfg.get("channels", {}).items()
                                   if v.get("name") and v.get("name") != str(k)})
@@ -336,12 +421,15 @@ class Engine:
         self.status("mt5", True, "Connected")
         if self.stop_event.is_set(): return
         from telethon import events
-        svc = service(); ids = [int(k) for k in chans]
-        handlers = ((self._on_new, events.NewMessage(chats=ids)), (self._on_edit, events.MessageEdited(chats=ids)))
+        svc = service(); handlers = []
 
         async def attach():
             client = await svc.get_client(self.cfg)
             await login(client, self.cfg, self.ask)
+            self.tracked = await self._followed_channels(client, set(chans))
+            ids = [int(k) for k in chans] + [int(k) for k in self.tracked]
+            if ids:
+                handlers.extend(((self._on_new, events.NewMessage(chats=ids)), (self._on_edit, events.MessageEdited(chats=ids))))
             for h, e in handlers: client.add_event_handler(h, e)
             return client
 
@@ -350,12 +438,23 @@ class Engine:
 
         self.client = svc.run(attach()); self.loop = svc.loop
         try:
+            if not chans and not self.tracked:
+                raise RuntimeError("No channels are ticked. Click Channels and tick at least one.")
+            try: self.store.set_names({k: v for k, v in self.tracked.items() if v and v != k})
+            except Exception: pass
             self.status("telegram", True, "Connected")
-            self.log("Copying is ON. Watching: " + ", ".join(v.get("name", k) for k, v in chans.items()))
-            self._last_share = SH.first_due(time.monotonic())
+            if chans: self.log("Copying is ON. Watching: " + ", ".join(v.get("name", k) for k, v in chans.items()))
+            else: self.log("Copying is OFF for every channel.")
+            if self.tracked:
+                self.log(f"Tracking pips on paper for {len(self.tracked)} followed channel(s) that are not copied. "
+                         "No trades are opened for them.")
+            self._last_share = SH.first_due(time.monotonic()); self._last_track = 0.0
+            self._track_update()                       # catch up on trackers from before a restart
             while not self.stop_event.wait(5):
                 self._check_break_even()
                 self._expire_waiting()
+                if time.monotonic() - self._last_track >= TRACK_EVERY:
+                    self._last_track = time.monotonic(); self._track_update()
                 if time.monotonic() - self._last_share >= SH.INTERVAL:
                     self._last_share = time.monotonic(); self._share_results()
                 if not self.client.is_connected():      # network dropped: reconnect the same client
@@ -372,7 +471,8 @@ class Engine:
         return C.channel_settings(self.cfg, chat_id)
 
     def _name(self, chat_id):
-        return self.cfg["channels"].get(str(chat_id), {}).get("name", str(chat_id))
+        n = self.cfg["channels"].get(str(chat_id), {}).get("name")
+        return n or getattr(self, "tracked", {}).get(str(chat_id)) or str(chat_id)
 
     # -- signals without a stop loss: wait for the same channel to send the numbers --
     def _wait_minutes(self, st):
@@ -384,14 +484,15 @@ class Engine:
         self._waiting[str(chat_id)] = {"sig": sig, "msg_id": msg_id, "at": posted or time.time(),
                                        "minutes": self._wait_minutes(st)}
         self.log(f"[{self._name(chat_id)}] Waiting for {self._name(chat_id)} to send the stop loss and take profit for "
-                 f"{sig.side} {sig.symbol}. Nothing is opened until then (up to {self._wait_minutes(st):.0f} minutes).")
+                 f"{sig.side} {sig.symbol}. Nothing is {'tracked' if _tracked(self, chat_id) else 'opened'} until then "
+                 f"(up to {self._wait_minutes(st):.0f} minutes).")
 
     def _waiting_for(self, chat_id):
         w = getattr(self, "_waiting", {}).get(str(chat_id))
         if w and time.time() - w["at"] > w["minutes"] * 60:
             self._waiting.pop(str(chat_id), None)
             self.log(f"[{self._name(chat_id)}] Stopped waiting: no stop loss came for {w['sig'].side} {w['sig'].symbol} "
-                     f"within {w['minutes']:.0f} minutes, so it was not copied.")
+                     f"within {w['minutes']:.0f} minutes, so it was not {'tracked' if _tracked(self, chat_id) else 'copied'}.")
             return None
         return w
 
@@ -430,6 +531,8 @@ class Engine:
         if sig.sl is None and self._wait_minutes(st):
             self._remember(chat_id, msg_id, sig, st, posted); return
         getattr(self, "_waiting", {}).pop(str(chat_id), None)   # a full signal replaces any call we were waiting on
+        if _tracked(self, chat_id):
+            return self._track_open(chat_id, msg_id, sig, st, parent_id, posted)
         tid = getattr(sig, "trade_id", None)
         if tid and self.store.has_trade(chat_id, tid):
             self.log(f"[{self._name(chat_id)}] trade #{tid} was already copied, ignoring repost"); return
@@ -448,7 +551,7 @@ class Engine:
         """A reply (or an edited reply) that is itself the full signal: entry or zone, stop loss and take
         profits, while the short parent message ('XAUUSD BUY NOW') never opened a trade. The symbol and
         direction are taken from the parent when the reply leaves them out. Returns a Signal or None."""
-        if self.store.get(chat_id, reply_id): return None          # a trade exists: this is a modify
+        if self._rec(chat_id, reply_id): return None          # a trade (or tracker) exists: this is a modify
         upd = parse_update(text)
         if not upd or upd.sl is None or not upd.tps: return None   # not complete enough to be a new trade
         try:
@@ -466,29 +569,41 @@ class Engine:
                  f"{' to ' + str(s.entry_high) if s.entry_high else ''}, stop loss {s.sl or 'none'}, take profits {', '.join(map(str, s.tps)) or 'none'}")
 
     def _share_results(self, wait=False):
-        """Crowd ranking: per channel results only. Reads MT5 here, sends in the background. Never raises."""
+        """Crowd ranking: per channel results plus one record per signal (copied and tracked). Reads MT5 here,
+        sends in the background. Never raises."""
         try:
             cfg = C.load()
             if not SH.enabled(cfg):
                 if cfg.get("share_results", True) and not (cfg.get("licence_key") or "").strip():
                     self.log("Channel results not shared: no licence key entered.")
                 return
+            tr = getattr(self, "tracker", None)
             with self.mt5_lock:
                 from .executor import mt5
                 if mt5 is None: return
-                rows = SH.collect(cfg, mt5, self.store.data, log=self.log)
-            if not rows:
+                off = int((tr.data.get("offset") if tr else 0) or 0)
+                rows, copied = SH.collect_all(cfg, mt5, self.store.data, log=self.log, offset=off)
+            tracked = tr.upload_rows() if tr else []
+            signals = copied + tracked
+            if not rows and not signals:
                 self.log("Channel results not shared yet: no closed copied trades found in MT5 history."); return
             def bg():
                 try:
                     un = {}
-                    titles = resolve_titles(cfg, [r["id"] for r in rows], usernames=un)
+                    ids = sorted({r["id"] for r in rows} | {s["channel"] for s in signals})
+                    titles = resolve_titles(cfg, ids, usernames=un)
                     if titles: self.store.set_names(titles)
                     if un: self.store.set_usernames(un)
                     for r in rows:
                         if titles.get(r["id"]) and not titles[r["id"]].startswith("@"): r["title"] = titles[r["id"]]
                         r["username"] = un.get(r["id"]) or r.get("username")
-                    SH.send(cfg, rows, log=self.log)
+                    names = dict(self.store.data.get("names") or {})
+                    for s in signals:
+                        t = titles.get(s["channel"]) or names.get(s["channel"]) or self._name(s["channel"])
+                        if t and t != s["channel"] and not t.startswith("@"): s["title"] = t
+                        if un.get(s["channel"]): s["username"] = un[s["channel"]]
+                    if SH.send(cfg, rows, log=self.log, signals=signals) and tr and tracked:
+                        tr.mark_uploaded([s["signal_id"] for s in tracked])
                 except Exception as e:
                     self.log(f"Sharing channel results failed: {e}")
             t = threading.Thread(target=bg, daemon=True); t.start()
@@ -517,6 +632,13 @@ class Engine:
             self.log(f"Break even check failed: {e}")
 
     def _apply(self, chat_id, msg_id, cmd, st):
+        if _tracked(self, chat_id):
+            try:
+                if self.tracker.get(chat_id, msg_id) and self.tracker.apply(self._market(), chat_id, msg_id, cmd):
+                    self.log(f"[{self._name(chat_id)}] tracked signal: {cmd.action.replace('_', ' ').lower()} noted (no trade, tracking only)")
+            except Exception as e:
+                self.log(f"[{self._name(chat_id)}] Could not update a tracked signal: {e}")
+            return
         rec = self.store.get(chat_id, msg_id) if msg_id else None
         if not rec:
             self.log(f"[{self._name(chat_id)}] {cmd.action.replace('_', ' ').lower()}: no copied trades belong to that signal, nothing to do"); return
@@ -529,7 +651,7 @@ class Engine:
     async def _on_new(self, ev):
         try:
             text, chat, st = ev.raw_text or "", ev.chat_id, self._st(ev.chat_id)
-            if not st.get("enabled", True): return
+            if not st.get("enabled", True) and not _tracked(self, chat): return
             reply_id = ev.message.reply_to_msg_id
             text = _strip_quote(ev.message, text)
             parsed = parse(text)
@@ -540,7 +662,7 @@ class Engine:
                 if self._too_old(chat, ev.message, st, what): return   # reconnect replays and late messages
             if reply_id and isinstance(parsed, Signal) and not _reply_may_open(ev.message, parsed):
                 parsed = None   # a reply only opens when it holds its own full signal, never from a quote
-            if reply_id and isinstance(parsed, Signal) and self.store.get(chat, reply_id):
+            if reply_id and isinstance(parsed, Signal) and self._rec(chat, reply_id):
                 self.log(f"[{self._name(chat)}] reply repeats a signal that was already copied, treating it as an update")
                 parsed = Command("MODIFY", sl=parsed.sl, tps=parsed.tps)
             if isinstance(parsed, Signal):
@@ -566,16 +688,16 @@ class Engine:
                 if cmd: self._apply(chat, reply_id, cmd, st)
                 return
             if isinstance(parsed, Command) and st.get("commands_without_reply_apply_to_last", True):
-                self._apply(chat, self.store.last_id(chat), parsed, st)
+                self._apply(chat, self._last(chat), parsed, st)
         except Exception as e:
             self.log(f"Could not handle a message: {e}")
 
     async def _on_edit(self, ev):
         try:
             chat, st = ev.chat_id, self._st(ev.chat_id)
-            if not st.get("follow_edits", True) or not st.get("enabled", True): return
+            if not st.get("follow_edits", True) or (not st.get("enabled", True) and not _tracked(self, chat)): return
             text = _strip_quote(ev.message, ev.raw_text or "")
-            rec = self.store.get(chat, ev.id)
+            rec = self._rec(chat, ev.id)
             parsed = parse(text)
             if (parsed is not None or parse_update(text)) and self._too_old(chat, ev.message, st, "edited message", edited=True):
                 return
@@ -601,7 +723,7 @@ class Engine:
                 if parsed.sl != rec.get("sl") or parsed.tps != rec.get("tps"):
                     self.log(f"[{self._name(chat)}] signal was edited: stop loss {parsed.sl}, take profits {parsed.tps}")
                     self._apply(chat, ev.id, Command("MODIFY", sl=parsed.sl, tps=parsed.tps), st)
-                    self.store.update(chat, ev.id, sl=parsed.sl, tps=parsed.tps)
+                    if not _tracked(self, chat): self.store.update(chat, ev.id, sl=parsed.sl, tps=parsed.tps)
             elif isinstance(parsed, Command):
                 self._apply(chat, ev.id, parsed, st)
         except Exception as e:

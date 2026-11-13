@@ -26,6 +26,8 @@ class Store:
                 self.data.setdefault("names", {})[str(chat_id)] = record["channel_name"]
             tm = self.data.setdefault("tickets", {})     # permanent ticket to channel map, for Channel results
             for t in record.get("tickets") or []: tm[str(t)] = str(chat_id)
+            ts = self.data.setdefault("ticket_signals", {})   # permanent ticket to signal map, for per signal pips
+            for t in record.get("tickets") or []: ts[str(t)] = f"{chat_id}:{msg_id}"
             self.data["last"][str(chat_id)] = msg_id
             if len(self.data["signals"]) > 2000:
                 for k in list(self.data["signals"])[:500]:

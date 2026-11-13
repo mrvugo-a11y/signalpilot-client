@@ -91,7 +91,7 @@ class ResultsWindow(tk.Toplevel):
     """Profit and loss of closed trades per signal channel, read from MetaTrader 5 history."""
     def __init__(self, app):
         super().__init__(app.root); self.app = app
-        self.title("Channel results"); self.geometry("720x420"); self.transient(app.root)
+        self.title("Channel results"); self.geometry("900x440"); self.transient(app.root)
         from copier import results as R
         self.R = R
         top = ttk.Frame(self, padding=(12, 10, 12, 4)); top.pack(fill="x")
@@ -101,15 +101,18 @@ class ResultsWindow(tk.Toplevel):
         cb.pack(side="left", padx=6); cb.bind("<<ComboboxSelected>>", lambda e: self.refresh())
         ttk.Button(top, text="Refresh", command=self.refresh).pack(side="left")
         self.info = ttk.Label(top, text="", foreground=GREY); self.info.pack(side="right")
-        cols = (("name", "Channel", 200), ("profit", "Profit", 90), ("loss", "Loss", 90), ("net", "Net", 90),
-                ("trades", "Trades", 60), ("win", "Win rate", 70))
+        cols = (("name", "Channel", 200), ("source", "Source", 130), ("profit", "Profit", 80), ("loss", "Loss", 80), ("net", "Net", 80),
+                ("pips", "Pips", 80), ("trades", "Trades", 60), ("win", "Win rate", 70))
         self.tree = ttk.Treeview(self, columns=[c for c, _, _ in cols], show="headings")
         for c, t, w in cols:
             self.tree.heading(c, text=t); self.tree.column(c, width=w, anchor="w" if c == "name" else "e")
         self.tree.tag_configure("pos", foreground=GREEN); self.tree.tag_configure("neg", foreground=RED)
+        self.tree.tag_configure("tracked", background="#eef3fb")
         self.tree.pack(fill="both", expand=True, padx=12, pady=4)
         ttk.Label(self, text="Closed trades only, including swap and commission. Trades copied before version 1.2.8 "
-                  "are matched while their signal is still remembered; older ones show as Not tagged.",
+                  "are matched while their signal is still remembered; older ones show as Not tagged. Pips count each signal once. "
+                  "Rows marked Tracked, not copied are channels you follow but do not copy: their signals are followed on paper "
+                  "with live prices (result at TP1, the stop loss, a close message or after 7 days) and no trade is opened.",
                   foreground=GREY, wraplength=690, padding=(12, 0, 12, 8)).pack(anchor="w")
         if C.load().get("share_results", True):
             ttk.Label(self, text="Your channel results (no account details) are shared with SignalPilot to rank signal providers. "
@@ -147,10 +150,14 @@ class ResultsWindow(tk.Toplevel):
     def show(self, rows, cur):
         if not self.winfo_exists(): return
         self.tree.delete(*self.tree.get_children())
-        f = lambda v: f"{v:,.2f}"
+        f = lambda v: "" if v is None else f"{v:,.2f}"
+        fp = lambda v: "" if v is None else f"{v:+,.1f}"
         for r in rows:
-            self.tree.insert("", "end", values=(r["name"], f(r["profit"]), f(r["loss"]), f(r["net"]), r["trades"], f"{r['win_rate']:.0f}%"),
-                             tags=("pos",) if r["net"] > 0 else ("neg",) if r["net"] < 0 else ())
+            tracked = r.get("source") == "tracked"
+            score = r["pips"] if tracked else r["net"]
+            tags = (("pos",) if (score or 0) > 0 else ("neg",) if (score or 0) < 0 else ()) + (("tracked",) if tracked else ())
+            self.tree.insert("", "end", values=(r["name"], "Tracked, not copied" if tracked else "Copied", f(r["profit"]), f(r["loss"]),
+                                                f(r["net"]), fp(r.get("pips")), r["trades"], f"{r['win_rate']:.0f}%"), tags=tags)
         self.info.configure(text=f"Amounts in {cur or 'account currency'}" if rows else "No closed trades in this period.")
 
 
@@ -403,6 +410,7 @@ class SettingsWindow(tk.Toplevel):
         self.chsel = tk.StringVar(value=next(iter(self.names)))
         cb = ttk.Combobox(top, textvariable=self.chsel, values=list(self.names), state="readonly", width=50); cb.pack(side="left", padx=6)
         self.chon = tk.BooleanVar(); ttk.Checkbutton(top, text="Copy this channel", variable=self.chon).pack(side="left", padx=8)
+        self.chtrack = tk.BooleanVar(); ttk.Checkbutton(top, text="Track pips when not copying", variable=self.chtrack).pack(side="left")
         outer, self.chinner = scrollable(f); outer.pack(fill="both", expand=True)
         self.chrows = None; self.chcur = None
         cb.bind("<<ComboboxSelected>>", lambda e: self._show_channel()); self._show_channel()
@@ -412,12 +420,13 @@ class SettingsWindow(tk.Toplevel):
         if not self.chcur: return
         over = {k: r.get() for k, r in self.chrows.items() if r.override.get()}
         self.chcfg[self.chcur]["settings"] = over; self.chcfg[self.chcur]["enabled"] = bool(self.chon.get())
+        self.chcfg[self.chcur]["track"] = bool(self.chtrack.get())
 
     def _show_channel(self):
         try: self._collect_channel()
         except S.FieldError as e: messagebox.showerror("Check this value", str(e), parent=self); return
         self.chcur = self.names[self.chsel.get()]; ch = self.chcfg[self.chcur]
-        self.chon.set(ch.get("enabled", True))
+        self.chon.set(ch.get("enabled", True)); self.chtrack.set(ch.get("track", True))
         for w in self.chinner.winfo_children(): w.destroy()
         g = ttk.Frame(self.chinner, padding=4); g.pack(fill="x")
         defaults = self.cfg["default_settings"]

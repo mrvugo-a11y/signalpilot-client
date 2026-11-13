@@ -51,7 +51,7 @@ jobs:
       - name: Build installer
         shell: pwsh
         run: |
-          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { "1.3.16" }
+          $ver = if ("${{ github.ref_type }}" -eq "tag") { "${{ github.ref_name }}".TrimStart("v") } else { "1.3.17" }
           $iscc = Get-ChildItem "C:\Program Files*\Inno Setup*\ISCC.exe" | Select-Object -First 1
           & $iscc.FullName "/DAppVersion=$ver" installer.iss
           if ($LASTEXITCODE -ne 0) { exit 1 }

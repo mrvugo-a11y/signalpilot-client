@@ -64,10 +64,13 @@ GENERAL_FIELDS = [
      "With country code, for example +27821234567."),
     ("minimise_to_tray", "Hide to the tray when minimised", "bool", None,
      "Keeps the copier running next to the clock instead of on the taskbar."),
-    ("share_results", "Share my channel results to help rank the best signal providers", "bool", None,
+    ("share_results", "Share my channel results to help rank signal providers", "bool", None,
      "Shares only your per channel results, never your account details or logins. Untick to stop sharing."),
     ("start_copying_on_launch", "Start copying when the program opens", "bool", None,
      "Saves you clicking Start every time."),
+    ("track_followed", "Track pips for channels I follow but do not copy", "bool", None,
+     "While the copier runs, signals from your other Telegram channels are followed on paper with live MetaTrader 5 "
+     "prices. No trade is ever opened for them. Their pips show in Channel results as Tracked, not copied."),
 ]
 
 MT5_FIELDS = [

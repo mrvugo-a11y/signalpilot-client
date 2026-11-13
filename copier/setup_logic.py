@@ -54,6 +54,7 @@ def apply_channel_selection(cfg, chans, selected_ids):
         if str(cid) in sel:
             old = cur.get(str(cid), {})
             new[str(cid)] = {"name": name, "enabled": True, "settings": old.get("settings", {})}
+            if "track" in old: new[str(cid)]["track"] = old["track"]
     cfg["channels"] = new
     return cfg
 

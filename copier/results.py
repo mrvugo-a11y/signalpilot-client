@@ -141,4 +141,29 @@ def fetch(cfg, period, mt5=None, store_data=None, now=None):
     ai = mt5.account_info()
     magic = int(cfg.get("magic_number", 0) or 0) or None
     rows = aggregate(deals, tm, names, since, magic, include_untagged=magic is not None)
+    from . import share as SH
+    from .tracker import Tracker
+    tr = Tracker()
+    copied = SH.copied_signals(deals, SH.signal_map(store_data), int(tr.data.get("offset") or 0), since)
+    add_pips(rows, copied, tr.channel_rows(since, names))
     return rows, getattr(ai, "currency", "") if ai else ""
+
+
+def add_pips(rows, copied_signals, tracked_rows):
+    """Adds a pips figure to every copied channel row (once per signal: a signal split over several trades counts
+    once, at its average entry and exit), and appends channels tracked on paper (source 'tracked', no money)."""
+    per = {}
+    for s in copied_signals:
+        if s.get("pips") is None: continue
+        c = per.setdefault(str(s["channel"]), [0.0, 0]); c[0] += float(s["pips"]); c[1] += 1
+    for r in rows:
+        r.setdefault("source", "copied")
+        p = per.get(str(r["channel"]))
+        r["pips"] = round(p[0], 1) if p else None; r["signals"] = p[1] if p else 0
+    have = {str(r["channel"]) for r in rows}
+    for t in tracked_rows:
+        if str(t["channel"]) in have: continue      # a channel copied in this period shows its real trades
+        rows.append({"channel": t["channel"], "name": t["name"], "profit": None, "loss": None, "net": None,
+                     "trades": t["trades"], "wins": t["wins"], "win_rate": t["win_rate"], "pips": t["pips"],
+                     "signals": t["trades"], "source": "tracked"})
+    return rows

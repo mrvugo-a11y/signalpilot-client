@@ -20,6 +20,7 @@ DEFAULTS = {
     "mt5_path": "", "mt5_login": 0, "mt5_password": "", "mt5_server": "",
     "channels": {}, "default_settings": DEFAULT_SETTINGS,
     "setup_done": False, "share_results": True, "minimise_to_tray": True, "start_copying_on_launch": False,
+    "track_followed": True,
 }
 
 

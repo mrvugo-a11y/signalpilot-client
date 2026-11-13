@@ -167,7 +167,7 @@ class TestEngine(Home):
         e = Engine(lambda m: None, None); e.ex = types.SimpleNamespace(cfg=None)
         cfg = {"channels": {"2": {"enabled": True}, "1": {"enabled": False}}}
         e.reload_settings(cfg)
-        self.assertIs(e.ex.cfg, cfg); self.assertEqual(e.channel_ids(), ["2"])
+        self.assertIs(e.ex.cfg, cfg); self.assertEqual(e.channel_ids(), ["2", "track:1", "track_followed"])   # 1.3.17: unticked channel 1 is tracked
 
     def test_make_client_without_credentials_is_friendly(self):
         from copier import engine

@@ -75,7 +75,7 @@ class Stats(unittest.TestCase):
 class Setting(unittest.TestCase):
     def test_default_on_label_and_persistence(self):
         f = [x for x in S.GENERAL_FIELDS if x[0] == "share_results"][0]
-        self.assertEqual(f[1], "Share my channel results to help rank the best signal providers")
+        self.assertEqual(f[1], "Share my channel results to help rank signal providers")   # 1.3.17: customer copy without "best"
         self.assertEqual(f[4], "Shares only your per channel results, never your account details or logins. Untick to stop sharing.")
         self.assertIs(C.DEFAULTS["share_results"], True)
         d = tempfile.mkdtemp(); os.environ["SIGNALPILOT_HOME"] = d
