@@ -3,7 +3,7 @@ Customer data lives in %APPDATA%\\SignalPilot (see config.data_dir), so an updat
 import json, os, re, subprocess, sys, tempfile, urllib.request
 from . import __version__, config as C
 
-DEFAULT_SITE = "https://signalcopier-u6bo.onrender.com"
+OFFICIAL_SITE = "https://signalpilot.vodsfire.co.za"
 GITHUB_LATEST = "https://api.github.com/repos/mrvugo-a11y/signalpilot-client/releases/latest"
 CHECK_EVERY_MS = 6 * 3600 * 1000
 
@@ -11,7 +11,7 @@ CHECK_EVERY_MS = 6 * 3600 * 1000
 def site_base(cfg=None):
     url = C.licence_url(cfg or {})
     m = re.match(r"(https?://[^/]+)", url)
-    return m.group(1) if m else DEFAULT_SITE
+    return m.group(1) if m else OFFICIAL_SITE
 
 
 def vtuple(v):
@@ -58,7 +58,7 @@ def download(url, progress=None):
     os.replace(tmp, dest); return dest
 
 
-DOWNLOAD_PAGE = DEFAULT_SITE + "/download"
+DOWNLOAD_PAGE = OFFICIAL_SITE + "/download"
 STATE_FILE = "update_state.json"
 LOG_NAME = "SignalPilot-update.log"
 

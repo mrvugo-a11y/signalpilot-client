@@ -23,6 +23,14 @@ class TestUpdater(unittest.TestCase):
         with mock.patch.object(U, "_get_json", side_effect=OSError):
             self.assertIsNone(U.newer_available({}, "1.2.1"))
 
+    def test_no_render_fallback(self):
+        self.assertFalse(hasattr(U, "DEFAULT_SITE"))
+        src = Path if False else open(U.__file__, encoding="utf-8").read()
+        self.assertNotIn("onrender.com", src)
+        self.assertNotIn("signalcopier-u6bo", src)
+        with mock.patch.object(U.C, "licence_url", return_value=""):
+            self.assertEqual(U.site_base({}), "https://signalpilot.vodsfire.co.za")
+
 
 class TestUpdateFlow(unittest.TestCase):
     def setUp(self):

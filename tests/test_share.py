@@ -112,5 +112,71 @@ class FirstUploadAndLogging(unittest.TestCase):
         self.assertIn("failed: no network", msgs[-1])
 
 
+
+class IncrementalAndPips(unittest.TestCase):
+    def setUp(self):
+        self.d = tempfile.mkdtemp()
+        os.environ["SIGNALPILOT_HOME"] = self.d
+
+    def tearDown(self):
+        os.environ.pop("SIGNALPILOT_HOME", None)
+
+    def sig(self, n=1, pips=12.0):
+        return {"channel": "-1001", "signal_id": f"-1001:{n}", "msg_id": n, "symbol": "EURUSD",
+                "side": "BUY", "entry": 1.1, "exit": 1.102, "pips": pips, "outcome": "closed",
+                "source": "copied"}
+
+    def test_pips_present_on_every_signal_in_payload(self):
+        signals = [self.sig(1, 20.0), self.sig(2, None), self.sig(3, 0.0)]
+        body = SH.payload(CFG, [{"id": "-1001", "trades": 3}], signals)
+        self.assertEqual(len(body["signals"]), 3)
+        for s in body["signals"]:
+            self.assertIn("pips", s)
+        self.assertEqual(SH.assert_signals_carry_pips(body["signals"]), [])
+        self.assertEqual(SH.assert_signals_carry_pips([{"signal_id": "x"}]), [0])
+
+    def test_send_posts_pips_on_every_uploaded_signal(self):
+        got = {}
+        class R:
+            status = 200
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+        def opener(req, timeout):
+            got["timeout"] = timeout
+            got["body"] = json.loads(req.data)
+            return R()
+        self.assertTrue(SH.send(CFG, [{"id": "-1001", "trades": 2}], opener, signals=[self.sig(1), self.sig(2, None)]))
+        self.assertEqual(got["timeout"], 180)
+        for s in got["body"]["signals"]:
+            self.assertIn("pips", s)
+
+    def test_send_timeout_is_180_and_retries_once(self):
+        calls = []
+        def boom(req, timeout):
+            calls.append(timeout)
+            raise OSError("no network")
+        self.assertFalse(SH.send(CFG, [{"id": "-1", "trades": 1}], boom, signals=[self.sig()]))
+        self.assertEqual(calls, [180, 180])
+
+    def test_only_new_or_changed_signals_are_resent(self):
+        got = []
+        class R:
+            status = 200
+            def __enter__(s): return s
+            def __exit__(s, *a): return False
+        def opener(req, timeout):
+            got.append(json.loads(req.data))
+            return R()
+        s1, s2 = self.sig(1), self.sig(2)
+        self.assertTrue(SH.send(CFG, [{"id": "-1001", "trades": 2}], opener, signals=[s1, s2]))
+        self.assertEqual({s["signal_id"] for s in got[-1]["signals"]}, {"-1001:1", "-1001:2"})
+        self.assertTrue(SH.send(CFG, [{"id": "-1001", "trades": 2}], opener, signals=[s1, s2]))
+        self.assertNotIn("signals", got[-1])
+        s1b = self.sig(1, pips=15.0)
+        self.assertTrue(SH.send(CFG, [{"id": "-1001", "trades": 2}], opener, signals=[s1b, s2]))
+        self.assertEqual([s["signal_id"] for s in got[-1]["signals"]], ["-1001:1"])
+        self.assertEqual(got[-1]["signals"][0]["pips"], 15.0)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -6,7 +6,7 @@ From 1.3.17 the upload also holds one record per signal ("signals"): channel id,
 message number), symbol, buy or sell, entry and exit price, pips, outcome and times, marked source "copied" (real trades
 from MT5 history) or "tracked" (followed on paper for channels that are not copied). The server uses the signal id to
 count every signal once across all customers. Older servers ignore the extra key."""
-import json, time, urllib.request
+import json, os, time, urllib.request
 from datetime import datetime
 from . import config as C, results as R, mt5hist as H, pips as P, __version__
 from .tracker import signal_row
@@ -170,25 +170,119 @@ def payload(cfg, channels, signals=None):
     return out
 
 
+
+SEND_TIMEOUT = 180
+SHARE_STATE = "share_state.json"
+SEND_RETRIES = 1   # one retry after the first attempt
+
+
+def _share_state_path():
+    return C.path(SHARE_STATE)
+
+
+def read_share_state():
+    try:
+        with open(_share_state_path(), encoding="utf-8") as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def write_share_state(d):
+    try:
+        os.makedirs(C.data_dir(), exist_ok=True)
+        path = _share_state_path()
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(d, f)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def signal_digest(sig):
+    return json.dumps(sig, sort_keys=True, default=str)
+
+
+def new_or_changed(signals, state=None):
+    """Signals whose id is new or whose payload changed since the last successful upload."""
+    sent = (state or {}).get("sent") or {}
+    out = []
+    for s in signals or []:
+        sid = str((s or {}).get("signal_id") or "")
+        if not sid or sent.get(sid) != signal_digest(s):
+            out.append(s)
+    return out
+
+
+def remember_sent(signals, state=None):
+    state = dict(state or {})
+    sent = dict(state.get("sent") or {})
+    for s in signals or []:
+        sid = str((s or {}).get("signal_id") or "")
+        if not sid:
+            continue
+        sent.pop(sid, None)
+        sent[sid] = signal_digest(s)
+    while len(sent) > 6000:
+        sent.pop(next(iter(sent)))
+    state["sent"] = sent
+    state["last_ok"] = int(time.time())
+    return state
+
+
+def assert_signals_carry_pips(signals):
+    """Every per-signal record in an upload must include a pips field (a number, or null when the pip size is unknown)."""
+    missing = []
+    for i, s in enumerate(signals or []):
+        if not isinstance(s, dict) or "pips" not in s:
+            missing.append(i)
+    return missing
+
+
 def first_due(now, interval=INTERVAL, delay=FIRST_DELAY):
     """Value for the 'last shared' clock so the first upload happens `delay` seconds after start."""
     return now - interval + delay
 
 
-def send(cfg, channels, opener=urllib.request.urlopen, timeout=60, log=None, signals=None):
+def send(cfg, channels, opener=urllib.request.urlopen, timeout=SEND_TIMEOUT, log=None, signals=None):
     """Posts the results. Returns True on success. Never raises. Sends nothing when sharing is off.
-    log(msg), when given, receives one line saying whether the upload worked and why not."""
+    From 1.3.18 the timeout is 180 seconds with one retry, and only new or changed signals are sent
+    (channel totals are still sent every time). log(msg), when given, receives one line saying whether
+    the upload worked and why not."""
     say = log or (lambda m: None)
     if not enabled(cfg) or not (channels or signals): return False
-    try:
-        req = urllib.request.Request(endpoint(cfg), data=json.dumps(payload(cfg, channels, signals)).encode(),
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with opener(req, timeout=timeout) as r:
-            ok = 200 <= getattr(r, "status", 200) < 300
-        extra = f" and {len(signals)} signal(s)" if signals else ""
-        say(f"Shared results for {len(channels)} channel(s){extra} with SignalPilot." if ok
-            else f"Sharing channel results failed (server answered {getattr(r, 'status', '?')}).")
-        return ok
-    except Exception as e:
-        say(f"Sharing channel results failed: {e}")
-        return False
+    state = read_share_state()
+    to_send = new_or_changed(signals, state)
+    if not (channels or to_send): return False
+    body = payload(cfg, channels, to_send)
+    last_err = None
+    ok = False
+    attempts = 1 + SEND_RETRIES
+    for attempt in range(attempts):
+        try:
+            req = urllib.request.Request(endpoint(cfg), data=json.dumps(body).encode(),
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with opener(req, timeout=timeout) as r:
+                status = getattr(r, "status", 200)
+                ok = 200 <= status < 300
+                if not ok:
+                    last_err = f"server answered {status}"
+                    # retry once on a temporary server error; do not retry a 4xx answer
+                    if 400 <= status < 500:
+                        break
+                    continue
+                break
+        except Exception as e:
+            last_err = str(e)
+            ok = False
+            continue
+    extra = f" and {len(to_send)} signal(s)" if to_send else ""
+    if ok:
+        write_share_state(remember_sent(to_send, state))
+        say(f"Shared results for {len(channels)} channel(s){extra} with SignalPilot.")
+        return True
+    say(f"Sharing channel results failed: {last_err}" if last_err and not last_err.startswith("server")
+        else f"Sharing channel results failed ({last_err or 'unknown error'}).")
+    return False
