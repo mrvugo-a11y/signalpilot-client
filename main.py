@@ -1,5 +1,5 @@
 """Telegram to MT5 SignalPilot: the customer facing window (setup wizard, settings, status and log)."""
-import asyncio, os, queue, sys, threading, tkinter as tk
+import re, asyncio, os, queue, sys, threading, tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, scrolledtext, filedialog
 from datetime import datetime
 from copier import config as C, licence, setup_logic as W, settings_schema as S, __version__
@@ -850,24 +850,71 @@ def acquire_single_instance():
         return False
 
 
-def focus_existing_window():
-    """Brings the already running window to the front. Returns True when it was found."""
-    if sys.platform != "win32": return False
+def running_versions(titles, brand=BRAND_NAME):
+    """Versions of the SignalPilot windows found, from titles like 'SignalPilot  v1.3.15' (any version)."""
+    out = []
+    for t in titles or []:
+        m = re.match(re.escape(brand) + r"\s+v(\d+(?:\.\d+){1,3})\s*$", str(t or ""))
+        if m: out.append(m.group(1))
+    return out
+
+
+def already_open_message(running, mine=__version__, brand=BRAND_NAME):
+    """What to tell the customer when another SignalPilot holds the single instance lock.
+    Returns (older_copy_running, text). An older copy keeps running its old code (and sends old style results
+    without per signal pips) until it is closed, so say which version is running and how to close it."""
+    other = [v for v in running if v != mine]
+    if not other:
+        return False, f"{brand} is already open. Look for it on the taskbar or in the system tray."
+    v = other[0]
+    return True, (f"An older {brand} (version {v}) is still running, so version {mine} cannot start yet.\n\n"
+                  f"Close version {v} first: open its window (or right click the {brand} icon in the system tray), "
+                  f"press Stop if copying is running, then close it and choose Quit. Then open {brand} again.\n\n"
+                  f"Open MT5 trades are not touched by closing {brand}.")
+
+
+def _signalpilot_windows():
+    """[(hwnd, title)] of every top level SignalPilot window, of any version, also hidden ones in the tray."""
+    if sys.platform != "win32": return []
     try:
         import ctypes
+        from ctypes import wintypes
         u32 = ctypes.windll.user32
-        hwnd = u32.FindWindowW(None, f"{BRAND_NAME}  v{__version__}")
-        if not hwnd: return False
-        u32.ShowWindow(hwnd, 9); u32.SetForegroundWindow(hwnd); return True   # SW_RESTORE
+        found = []
+        proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+        def cb(hwnd, _):
+            n = u32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1); u32.GetWindowTextW(hwnd, buf, n + 1)
+                if running_versions([buf.value]): found.append((hwnd, buf.value))
+            return True
+        u32.EnumWindows(proto(cb), 0)
+        return found
     except Exception:
-        return False
+        return []
+
+
+def focus_existing_window():
+    """Brings the already running window (any version) to the front. Returns the titles found."""
+    wins = _signalpilot_windows()
+    if sys.platform == "win32" and wins:
+        try:
+            import ctypes
+            u32 = ctypes.windll.user32
+            hwnd = wins[0][0]
+            u32.ShowWindow(hwnd, 9); u32.SetForegroundWindow(hwnd)   # SW_RESTORE
+        except Exception:
+            pass
+    return [t for _, t in wins]
 
 
 def main():
     if not acquire_single_instance():
-        if not focus_existing_window():
+        titles = focus_existing_window()
+        older, text = already_open_message(running_versions(titles))
+        if older or not titles:
             r = tk.Tk(); r.withdraw()
-            messagebox.showinfo(BRAND_NAME, f"{BRAND_NAME} is already open. Look for it on the taskbar or in the system tray.")
+            (messagebox.showwarning if older else messagebox.showinfo)(BRAND_NAME, text)
             r.destroy()
         return
     root = tk.Tk(); App(root); root.mainloop()

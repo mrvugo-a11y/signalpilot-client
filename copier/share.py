@@ -162,10 +162,11 @@ def collect_all(cfg, mt5, store_data, log=None, offset=0):
 
 
 def payload(cfg, channels, signals=None):
-    out = {"key": (cfg.get("licence_key") or "").strip(), "product": "tg-copier",
+    # app_version is sent on every upload from 1.3.19 (before it was only sent with signals), so the server can
+    # tell an upload from an old copy that is still running (no pip_moves, no signals) from a current one.
+    out = {"key": (cfg.get("licence_key") or "").strip(), "product": "tg-copier", "app_version": __version__,
            "channels": [{k: c.get(k) for k in FIELDS} for c in channels]}
     if signals:
-        out["app_version"] = __version__
         out["signals"] = list(signals)
     return out
 
@@ -281,7 +282,7 @@ def send(cfg, channels, opener=urllib.request.urlopen, timeout=SEND_TIMEOUT, log
     extra = f" and {len(to_send)} signal(s)" if to_send else ""
     if ok:
         write_share_state(remember_sent(to_send, state))
-        say(f"Shared results for {len(channels)} channel(s){extra} with SignalPilot.")
+        say(f"Shared results for {len(channels)} channel(s){extra} with SignalPilot (app {__version__}).")
         return True
     say(f"Sharing channel results failed: {last_err}" if last_err and not last_err.startswith("server")
         else f"Sharing channel results failed ({last_err or 'unknown error'}).")
