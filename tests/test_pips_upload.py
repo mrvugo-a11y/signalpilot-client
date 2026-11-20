@@ -61,6 +61,15 @@ class AlreadyOpen(unittest.TestCase):
         self.assertFalse(older); self.assertIn("already open", text)
 
 
+class Endpoint(unittest.TestCase):
+    def test_render_licence_address_sends_results_to_the_site(self):
+        self.assertEqual(SH.endpoint({"licence_url": "https://signalcopier-u6bo.onrender.com/api/licence"}),
+                         "https://signalpilot.vodsfire.co.za/api/channel-stats")
+
+    def test_other_hosts_unchanged(self):
+        self.assertEqual(SH.endpoint({"licence_url": "https://site.example/api/licence"}), "https://site.example/api/channel-stats")
+
+
 class UploadCarriesPips(unittest.TestCase):
     def body(self):
         rows, sigs = SH.collect_all(CFG, MT5, STORE, offset=0)

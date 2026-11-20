@@ -17,10 +17,17 @@ FIELDS = ("id", "title", "username", "trades", "wins", "losses", "net_r", "r_tra
           "profit_pct", "first_trade", "last_trade", "pip_moves")
 
 
+SITE_STATS = "https://signalpilot.vodsfire.co.za/api/channel-stats"
+
+
 def endpoint(cfg):
+    """Results upload address, next to the licence address. The built in licence address still points at the old
+    Render app, whose results handler dropped pip_moves and per signal records (fixed there on 20 Nov 2026 by
+    forwarding); from 1.3.19 an onrender.com licence address sends results straight to the SignalPilot site."""
     u = C.licence_url(cfg)
     if not u: return ""
     base = u.rsplit("/api/", 1)[0] if "/api/" in u else u.rstrip("/")
+    if ".onrender.com" in base.lower(): return SITE_STATS
     return base + "/api/channel-stats"
 
 
