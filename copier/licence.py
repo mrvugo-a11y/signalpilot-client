@@ -1,7 +1,11 @@
 """Licence check.
 - licence_url empty  -> offline TRIAL mode (TRIAL_DAYS from first run).
 - licence_url set    -> POST {"key","machine","product"} to the URL (e.g. https://yoursite/api/licence), expects JSON
-  {"valid": true, "expires": "YYYY-MM-DD", "plan": "..."} or {"valid": false, "message": "..."}.
+  {"valid": true, "expires": "YYYY-MM-DD", "plan": "...", "max_channels": N, "max_machines": N}
+  or {"valid": false, "message": "..."}. max_channels 0 means no channel cap (Unlimited).
+  Markets only plans have no copier. The app enforces the channel cap on distinct channels copied.
+  A plan change is applied on the next successful licence check (Start asks the server; a background
+  refresh also updates the cached limits).
 
 The last confirmed answer is cached in licence.dat (signed with an HMAC tied to this computer):
 - cache under CACHE_HOURS old and its expiry not passed -> OK at once, no network call (the app then refreshes quietly).
@@ -50,7 +54,7 @@ def _write(st):
 
 
 # ---- signed cache
-_FIELDS = ("key", "machine", "last_ok", "expires", "plan")
+_FIELDS = ("key", "machine", "last_ok", "expires", "plan", "max_channels", "max_machines")
 
 def _sig(c, machine):
     secret = hashlib.sha256(_SECRET + machine.encode()).digest()
@@ -67,9 +71,10 @@ def load_cache():
     return c
 
 
-def save_cache(key, expires, plan, now=None):
+def save_cache(key, expires, plan, now=None, max_channels=None, max_machines=None):
     c = {"key": key, "machine": machine_id(), "last_ok": float(now if now is not None else time.time()),
-         "expires": expires or "", "plan": plan or ""}
+         "expires": expires or "", "plan": plan or "",
+         "max_channels": max_channels, "max_machines": max_machines}
     c["sig"] = _sig(c, c["machine"])
     st = _state(); st["cache"] = c
     for old in ("last_ok", "key"): st.pop(old, None)   # pre 1.2.4 unsigned fields
@@ -121,7 +126,8 @@ def server_check(key, url, sleep=time.sleep, attempts=2):
     if ans is None:
         return UNREACHABLE, UNREACHABLE_MSG
     if ans.get("valid"):
-        save_cache(key, ans.get("expires"), ans.get("plan"))
+        save_cache(key, ans.get("expires"), ans.get("plan"),
+                   max_channels=ans.get("max_channels"), max_machines=ans.get("max_machines"))
         return OK, _valid_msg(ans.get("expires"))
     clear_cache()
     return REJECTED, "Licence not accepted: " + str(ans.get("message", "rejected"))
@@ -132,10 +138,12 @@ REFRESH = "refresh"   # quietly ask the server once in the background
 WAIT = "wait"         # keep retrying in the background (wait_for_server) until the server answers
 
 
-def check_full(key, url, now=None, sleep=time.sleep):
+def check_full(key, url, now=None, sleep=time.sleep, fresh=False):
     """Returns (ok, message, follow).
     ok: True (may run), False (blocked) or WAITING (never confirmed here: wait for the first server answer).
-    follow: None, REFRESH or WAIT."""
+    follow: None, REFRESH or WAIT.
+    fresh=True (Start): ask the server first so a plan change is applied before copying begins.
+    If the server cannot be reached, the signed cache / offline grace is used as usual."""
     st = _state()
     if not url:
         first = st.setdefault("trial_start", time.time()); _write(st)
@@ -147,7 +155,7 @@ def check_full(key, url, now=None, sleep=time.sleep):
         return False, "Please enter your licence key.", None
     now = time.time() if now is None else now
     c = load_cache()
-    if _usable(c, key, now, CACHE_HOURS * 3600):
+    if not fresh and _usable(c, key, now, CACHE_HOURS * 3600):
         return True, _valid_msg(c.get("expires")), REFRESH
     status, msg = server_check(key, url, sleep)
     if status == OK: return True, msg, None
@@ -197,6 +205,101 @@ def wait_for_server(key, url, cancelled=lambda: False, status=lambda msg: None, 
         while not cancelled() and clock() < end:
             sleep(min(1, end - clock()))
     return None
+
+
+
+# ---- plan channel and machine limits (enforced here; the licence API reports them)
+# max_channels 0 on a copier plan means no cap. Markets only has no copier at all.
+# These fallbacks match the website if an older server omits max_channels / max_machines.
+NO_COPIER_PLANS = frozenset({"markets", "markets_only", "markets_year"})
+PLAN_LIMITS = {
+    "trial": {"max_channels": 3, "max_machines": 1, "copier": True},
+    "free": {"max_channels": 3, "max_machines": 1, "copier": True},
+    "starter": {"max_channels": 3, "max_machines": 1, "copier": True},
+    "pro": {"max_channels": 10, "max_machines": 2, "copier": True},
+    "unlimited": {"max_channels": 0, "max_machines": 5, "copier": True},
+    "markets": {"max_channels": 0, "max_machines": 0, "copier": False},
+    "markets_only": {"max_channels": 0, "max_machines": 0, "copier": False},
+    "markets_year": {"max_channels": 0, "max_machines": 0, "copier": False},
+}
+
+
+def _int_or_none(v):
+    if v is None or v == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def resolve_limits(plan, max_channels=None, max_machines=None):
+    """Return {plan, max_channels, max_machines, copier}. max_channels 0 = no cap when copier is True."""
+    plan = str(plan or "").strip().lower()
+    base = dict(PLAN_LIMITS.get(plan) or {"max_channels": 3, "max_machines": 1, "copier": True})
+    if plan in NO_COPIER_PLANS:
+        base["copier"] = False
+        base["max_channels"] = 0
+        base["max_machines"] = 0
+        return {"plan": plan or "unknown", **base}
+    mc = _int_or_none(max_channels)
+    mm = _int_or_none(max_machines)
+    if mc is not None:
+        base["max_channels"] = mc
+    if mm is not None:
+        base["max_machines"] = mm
+    base["copier"] = True
+    return {"plan": plan or "unknown", **base}
+
+
+def cached_limits():
+    c = load_cache() or {}
+    return resolve_limits(c.get("plan"), c.get("max_channels"), c.get("max_machines"))
+
+
+def copyable_channel_ids(enabled_ids, limits=None):
+    """Split distinct enabled channel ids into those that may be copied and those that must not.
+    enabled_ids stay in the given order (first in, first copied)."""
+    lim = limits if limits is not None else cached_limits()
+    ids = []
+    seen = set()
+    for raw in enabled_ids or []:
+        k = str(raw)
+        if k in seen:
+            continue
+        seen.add(k)
+        ids.append(k)
+    if not lim.get("copier"):
+        return [], ids, lim
+    cap = int(lim.get("max_channels") or 0)
+    if cap <= 0:
+        return ids, [], lim
+    return ids[:cap], ids[cap:], lim
+
+
+def limit_message(allowed, skipped, limits):
+    lim = limits
+    plan = lim.get("plan") or "this"
+    if not lim.get("copier"):
+        return "Markets only does not include the trade copier, so no channels are copied."
+    cap = int(lim.get("max_channels") or 0)
+    if not skipped:
+        return ""
+    label = {"starter": "Starter", "pro": "Pro", "unlimited": "Unlimited", "trial": "Trial",
+             "free": "Free with Exness"}.get(plan, plan)
+    return (f"Your {label} plan allows {cap} Telegram channel" + ("s" if cap != 1 else "")
+            + f". Copying the first {len(allowed)} and not copying the other {len(skipped)}.")
+
+
+def picker_caption(limits=None):
+    lim = limits if limits is not None else cached_limits()
+    if not lim.get("copier"):
+        return "Markets only does not include the trade copier. Ticked channels are not copied."
+    cap = int(lim.get("max_channels") or 0)
+    if cap > 0:
+        return (f"Your plan can copy {cap} Telegram channel" + ("s" if cap != 1 else "")
+                + " at a time. If you tick more, only the first ones are copied.")
+    return "Your plan has no limit on the number of Telegram channels you can copy."
 
 
 def check(key, url):

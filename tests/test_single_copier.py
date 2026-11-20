@@ -51,7 +51,7 @@ class FakeApp:
     def ask(self, *a): return None
     def set_status(self, *a): pass
     def set_running(self, on): pass
-    def check_licence_async(self, then=None): self.jobs.append(lambda: then(True, "ok"))
+    def check_licence_async(self, then=None, fresh=False): self.jobs.append(lambda: then(True, "ok"))
     start = main.App.start; stop = main.App.stop; restart = main.App.restart
 
     def pump(self, n=50):

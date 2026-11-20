@@ -327,7 +327,8 @@ class Wizard(tk.Toplevel):
     def page_channels(self):
         if not self.chans:
             self.text("No channels were loaded. Go back and log in to Telegram again."); return
-        self.text("Tick the channels whose signals you want to copy. You can change this later with the Channels button.")
+        self.text("Tick the channels whose signals you want to copy. You can change this later with the Channels button. "
+                  + licence.picker_caption())
         self.picker = ChannelPicker(self.body, self.chans, self.cfg.get("channels", {})); self.picker.pack(fill="both", expand=True)
 
     def next_channels(self):
@@ -601,11 +602,11 @@ class App:
         except OSError: pass
 
     # -- licence / buttons
-    def check_licence_async(self, then=None):
+    def check_licence_async(self, then=None, fresh=False):
         self.set_status("licence", None, "Checking...")
         def run():
             cfg = C.load(); key, url = cfg.get("licence_key", ""), C.licence_url(cfg)
-            ok, msg, follow = licence.check_full(key, url)
+            ok, msg, follow = licence.check_full(key, url, fresh=fresh)
             if ok is licence.WAITING:     # never confirmed on this computer: wait for the first answer
                 self.q.put(("call", lambda: self._wait_for_licence(key, url, then, blocking=True))); return
             self._licence_result(ok, msg, then)
@@ -666,7 +667,9 @@ class App:
         if follow == licence.WAIT:
             self.q.put(("call", lambda: self._wait_for_licence(key, url))); return
         self.set_status("licence", ok, msg if len(msg) < 60 else msg[:57] + "...")
-        if ok: return
+        if ok:
+            self.q.put(("call", self.apply_licence_limits))
+            return
         self.log(f"Licence problem: {msg}")
         def block():
             if self.engine and self.engine.running():
@@ -693,11 +696,15 @@ class App:
             self._starting = False
             if not ok:
                 self.btn_start["state"] = "normal"; messagebox.showerror("Licence", msg); return
+            if not licence.cached_limits().get("copier"):
+                self.btn_start["state"] = "normal"
+                messagebox.showerror("Licence", "Markets only does not include the trade copier. Backdrop and Outlook are on the website.")
+                return
             if self.engine and self.engine.running(): return
             from copier.engine import Engine
             self.engine = Engine(self.log, self.ask, self.set_status); self.engine.start(); self.set_running(True)
             self.log("Starting... connecting to MetaTrader 5 and Telegram.")
-        self.check_licence_async(go)
+        self.check_licence_async(go, fresh=True)
 
     def stop(self):
         w = getattr(self, "_licence_waiting", None)
@@ -705,6 +712,18 @@ class App:
             w["cancel"] = True; w["then"] = None; self._starting = False
         self._restart_pending = False            # Stop also cancels a restart that is still waiting
         if self.engine and self.engine.running(): self.engine.stop(); self.log("Stopping...")
+
+    def apply_licence_limits(self):
+        """A plan change from a live licence check takes effect on the running copier."""
+        lim = licence.cached_limits()
+        if not lim.get("copier"):
+            if self.engine and self.engine.running():
+                self.stop(); self.log("Markets only does not include the trade copier. Copying has been stopped.")
+            return
+        if self.engine and self.engine.running():
+            old = self.engine.channel_ids(); self.engine.reload_settings(C.load())
+            if self.engine.channel_ids() != old:
+                self.log("Your plan limits changed, restarting the copier to apply them."); self.restart()
 
     def settings_saved(self, cfg):
         self.log("Settings saved.")
@@ -753,11 +772,17 @@ class App:
         try:
             cfg = C.load()
             w = tk.Toplevel(self.root); w.title("Tick the channels to copy"); w.geometry("480x540"); w.transient(self.root)
+            ttk.Label(w, text=licence.picker_caption(), wraplength=440).pack(anchor="w", padx=8, pady=(8, 0))
             p = ChannelPicker(w, chans, cfg.get("channels", {})); p.pack(fill="both", expand=True, padx=8, pady=8)
             def save():
                 try:
                     W.apply_channel_selection(cfg, chans, p.selected()); C.save(cfg)
-                    self.log(f"Saved {len(cfg['channels'])} channel(s)."); w.destroy()
+                    enabled = [k for k, v in cfg.get("channels", {}).items() if v.get("enabled", True)]
+                    allowed, skipped, lim2 = licence.copyable_channel_ids(enabled)
+                    msg = f"Saved {len(cfg['channels'])} channel(s)."
+                    extra = licence.limit_message(allowed, skipped, lim2)
+                    if extra: msg += " " + extra
+                    self.log(msg); w.destroy()
                     if self.engine and self.engine.running(): self.settings_saved(cfg)
                 except Exception as e:
                     self.log(f"Could not save channels: {e}")

@@ -1,6 +1,6 @@
 """Telegram listener: ties the parser, the ticket store and the MT5 executor together."""
 import asyncio, datetime, os, threading, time
-from . import config as C
+from . import config as C, licence as L
 from .parser import (parse, parse_command, parse_update, parse_signal, parse_bare_call, is_status, is_ru_info,
                      normalise, SIDE_RE, Signal, Command)
 from .store import Store
@@ -314,7 +314,9 @@ class Engine:
         tracking only, and whether every other followed channel is tracked."""
         if not getattr(self, "cfg", None): return []
         chans = self.cfg.get("channels", {})
-        out = sorted(k for k, v in chans.items() if v.get("enabled", True))
+        enabled = [k for k, v in chans.items() if v.get("enabled", True)]
+        allowed, _skipped, _lim = L.copyable_channel_ids(enabled)
+        out = list(allowed)
         out += sorted("track:" + k for k, v in chans.items() if not v.get("enabled", True) and v.get("track", True))
         out += sorted("notrack:" + k for k, v in chans.items() if v.get("track", True) is False)
         if self.cfg.get("track_followed", True): out.append("track_followed")
@@ -403,7 +405,13 @@ class Engine:
 
     def _main(self):
         self.cfg = C.load()
-        chans = {k: v for k, v in self.cfg.get("channels", {}).items() if v.get("enabled", True)}
+        enabled = {k: v for k, v in self.cfg.get("channels", {}).items() if v.get("enabled", True)}
+        allowed_ids, skipped_ids, lim = L.copyable_channel_ids(list(enabled))
+        if not lim.get("copier"):
+            raise RuntimeError("Markets only does not include the trade copier. Backdrop and Outlook are on the website.")
+        chans = {k: enabled[k] for k in allowed_ids if k in enabled}
+        if skipped_ids:
+            self.log(L.limit_message(allowed_ids, skipped_ids, lim))
         some_tracked = any(not v.get("enabled", True) and v.get("track", True) for v in self.cfg.get("channels", {}).values())
         if not chans and not some_tracked and not self.cfg.get("track_followed", True):
             raise RuntimeError("No channels are ticked. Click Channels and tick at least one.")
