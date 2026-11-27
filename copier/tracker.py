@@ -359,14 +359,17 @@ class Tracker:
         names = names or {}; rows = {}
         for r in self.counted(since):
             c = rows.setdefault(r["chat"], {"channel": r["chat"], "name": names.get(r["chat"]) or r.get("channel_name") or r["chat"],
-                                            "trades": 0, "wins": 0, "pips": 0.0, "pips_trades": 0, "source": "tracked"})
+                                            "trades": 0, "wins": 0, "pips": 0.0, "pips_trades": 0, "r": 0.0, "r_trades": 0, "source": "tracked"})
             c["trades"] += 1
+            rr = P.r_multiple(r["side"], r.get("fill"), r.get("exit"), _orig_sl(r))
+            if rr is not None: c["r"] += rr; c["r_trades"] += 1
             if r.get("pips") is not None:
                 c["pips"] += float(r["pips"]); c["pips_trades"] += 1
                 if r["pips"] > 0: c["wins"] += 1
         out = []
         for c in rows.values():
             c["pips"] = round(c["pips"], 1) if c["pips_trades"] else None
+            c["r"] = round(c["r"], 2) if c["r_trades"] else None
             c["win_rate"] = round(100.0 * c["wins"] / c["trades"], 1) if c["trades"] else 0.0
             out.append(c)
         return sorted(out, key=lambda c: (c["pips"] is None, -(c["pips"] or 0)))
@@ -378,4 +381,13 @@ def signal_row(r, open_utc, close_utc, source="tracked"):
             "symbol": r.get("broker") or r.get("symbol"), "side": r["side"], "entry": r.get("fill"), "exit": r.get("exit"),
             "pips": r.get("pips"), "outcome": r.get("outcome"), "signal_time": utc_text(r.get("created")),
             "open_time": utc_text(open_utc), "close_time": utc_text(close_utc), "source": source,
-            "tp_pips": {k: v for k, v in (r.get("tp_pips") or {}).items() if v is not None}}
+            "tp_pips": {k: v for k, v in (r.get("tp_pips") or {}).items() if v is not None},
+            # from 1.3.20: the signal's original stop loss and the result in R (move / distance to the stop loss)
+            "sl": _orig_sl(r), "r": P.r_multiple(r["side"], r.get("fill"), r.get("exit"), _orig_sl(r))}
+
+
+def _orig_sl(r):
+    """The stop loss the signal was sent with (sl0), before any move to break even."""
+    v = r.get("sl0") if r.get("sl0") else r.get("sl")
+    try: return float(v) if v else None
+    except (TypeError, ValueError): return None

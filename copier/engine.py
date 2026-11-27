@@ -590,6 +590,10 @@ class Engine:
                 from .executor import mt5
                 if mt5 is None: return
                 off = int((tr.data.get("offset") if tr else 0) or 0)
+                ex = getattr(self, "ex", None)
+                if ex is not None and hasattr(ex, "link_ok") and not ex.link_ok():     # 1.3.20: lost MT5 link, reconnect first
+                    self.log("MetaTrader 5 stopped answering. Reconnecting before reading results.")
+                    ex.reconnect()
                 rows, copied = SH.collect_all(cfg, mt5, self.store.data, log=self.log, offset=off)
             tracked = tr.upload_rows() if tr else []
             signals = copied + tracked

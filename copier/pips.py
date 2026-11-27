@@ -45,3 +45,16 @@ def pips(symbol, side, entry, exit_price):
     if size is None or entry is None or exit_price is None: return None
     sgn = side if isinstance(side, int) else (1 if str(side).upper() == "BUY" else -1)
     return round(sgn * (float(exit_price) - float(entry)) / size, 1)
+
+
+def r_multiple(side, entry, exit_price, sl):
+    """Result in R: the price move divided by the distance from entry to the stop loss (the amount risked).
+    +2.0 means the trade made twice what it risked, -1.0 a full stop loss. None when there is no usable stop loss."""
+    try:
+        e, x, s = float(entry), float(exit_price), float(sl)
+    except (TypeError, ValueError):
+        return None
+    risk = abs(e - s)
+    if not risk or risk <= abs(e) * 1e-6: return None
+    sgn = side if isinstance(side, int) else (1 if str(side).upper() == "BUY" else -1)
+    return round(sgn * (x - e) / risk, 2)

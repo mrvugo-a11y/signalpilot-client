@@ -32,18 +32,58 @@ class Executor:
     def shutdown(self):
         if mt5: mt5.shutdown()
 
+    def link_ok(self):
+        """True when the Python link to the running MetaTrader 5 still answers. After 'IPC send failed' (-10001)
+        every call returns None, which looked exactly like 'your broker has no such symbol'."""
+        try:
+            return mt5.terminal_info() is not None and mt5.account_info() is not None
+        except Exception:
+            return False
+
+    def reconnect(self):
+        """Re-opens only this app's link to the MetaTrader 5 that is already running (mt5.shutdown then
+        mt5.initialize). It does not close or restart MetaTrader 5 and does not touch open trades. True when the link answers again."""
+        try:
+            mt5.shutdown()
+        except Exception:
+            pass
+        try:
+            self.connect()
+        except Exception as e:
+            self.log(f"Could not reconnect to MetaTrader 5: {e}")
+            return False
+        ok = self.link_ok()
+        self.log("Reconnected to MetaTrader 5." if ok else "MetaTrader 5 still does not answer.")
+        return ok
+
     # ---------- symbols ----------
-    def resolve_symbol(self, sym, st):
-        smap = {k.upper(): v for k, v in st.get("symbol_map", {}).items()}
-        sym = smap.get(sym.upper(), sym).upper()
-        suffix = st.get("symbol_suffix", "")
+    def _find_symbol(self, sym, suffix):
         for cand in ([sym + suffix] if suffix else []) + [sym]:
             if mt5.symbol_info(cand) is not None:
                 mt5.symbol_select(cand, True); return cand
+            # a symbol hidden from Market Watch can answer None until it is selected: select it and ask again
+            if mt5.symbol_select(cand, True) and mt5.symbol_info(cand) is not None: return cand
         for s in mt5.symbols_get() or []:            # auto-detect broker suffix, e.g. XAUUSDm / XAUUSD.r
             n = s.name.upper()
             if n.startswith(sym) and len(n) - len(sym) <= 4:
                 mt5.symbol_select(s.name, True); return s.name
+        return None
+
+    def resolve_symbol(self, sym, st):
+        smap = {k.upper(): v for k, v in st.get("symbol_map", {}).items()}
+        sym = smap.get(sym.upper(), sym).upper()
+        suffix = st.get("symbol_suffix", "")
+        found = self._find_symbol(sym, suffix)
+        if found: return found
+        # 1.3.20: before saying the broker has no such symbol, make sure MetaTrader 5 is really answering.
+        # A lost link (seen as 'IPC send failed' in the log) made every symbol look missing until the app was restarted.
+        if not self.link_ok():
+            self.log(f"MetaTrader 5 stopped answering while looking up {sym}. Reconnecting and trying again.")
+            if self.reconnect():
+                found = self._find_symbol(sym, suffix)
+                if found: return found
+            else:
+                self.link_lost = True
         return None
 
     # ---------- helpers ----------
@@ -118,8 +158,11 @@ class Executor:
 
     # ---------- open ----------
     def open_signal(self, sig: Signal, st):
+        self.link_lost = False
         symbol = self.resolve_symbol(sig.symbol, st)
         if not symbol:
+            if getattr(self, "link_lost", False):
+                self.log(f"Skipped {sig.side} {sig.symbol}: MetaTrader 5 is not answering. Check that MetaTrader 5 is open and logged in."); return []
             self.log(f"Skipped: your broker has no symbol called {sig.symbol}. Add it under Settings, Rename symbols."); return []
         info = mt5.symbol_info(symbol); tick = mt5.symbol_info_tick(symbol)
         pt, digits = info.point, info.digits
