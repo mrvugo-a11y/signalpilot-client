@@ -21,7 +21,11 @@ class TestGui(unittest.TestCase):
     def test_windows_open_and_settings_save(self):
         import main
         from copier import config as C
-        root = tk.Tk(); app = main.App(root)
+        try:
+            root = tk.Tk()
+        except tk.TclError as e:      # the hosted Windows runner sometimes cannot find init.tcl for a second Tk
+            self.skipTest(f"Tk not usable here: {e}")
+        app = main.App(root)
         w = main.Wizard(app); self.assertEqual(w.step, "welcome"); w.next(); self.assertEqual(w.step, "licence")
         w.destroy()
         cfg = C.load(); cfg["channels"] = {"5": {"name": "Gold VIP", "enabled": True, "settings": {}}}; C.save(cfg)
