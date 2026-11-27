@@ -42,6 +42,18 @@ def utc_text(ts):
     except (OverflowError, OSError, ValueError): return None
 
 
+def sane_tps(tps, ref):
+    """Take profits without the ones that cannot be prices (1.3.20): a take profit written in pips, such as "TP 50",
+    was read as the price 50 and fixed a gold result at -35 000 pips. A take profit more than 25 percent away from the
+    stop loss is dropped (kept as None so TP numbering stays the same)."""
+    out = []
+    for tp in list(tps or []):
+        try: bad = tp is not None and ref and abs(float(tp) - float(ref)) > 0.25 * abs(float(ref))
+        except (TypeError, ValueError): bad = False
+        out.append(None if bad else tp)
+    return out
+
+
 def target_tp(rec):
     """(index starting at 1, price) of the take profit that fixes the result, or (None, None)."""
     tps = rec.get("tps") or []
@@ -190,7 +202,7 @@ class Tracker:
         side = sig.side.upper()                          # followed as the channel posted it (never reversed)
         rec = {"key": key, "chat": chat, "msg_id": int(msg_id), "channel_name": name, "symbol": sig.symbol, "broker": None,
                "side": side, "order_type": (sig.order_type or "MARKET").upper(), "entry": sig.entry, "entry_high": sig.entry_high,
-               "sl": sig.sl, "sl0": sig.sl, "tps": list(sig.tps or []), "target_tp": TARGET_TP, "created": float(posted or now),
+               "sl": sig.sl, "sl0": sig.sl, "tps": sane_tps(sig.tps, sig.sl), "target_tp": TARGET_TP, "created": float(posted or now),
                "state": "done", "outcome": None, "fill": None, "exit": None, "pips": None, "tp_hits": {}, "tp_pips": {},
                "source": "tracked", "rev": 1, "uploaded_rev": 0}
         broker = market.resolve(sig.symbol, st or {}) if market else None
@@ -253,7 +265,7 @@ class Tracker:
         with self.lock:
             if a == "MODIFY":
                 if cmd.sl is not None and cmd.sl != rec.get("sl"): rec["sl"] = cmd.sl; ch = True
-                if cmd.tps and list(cmd.tps) != rec.get("tps"): rec["tps"] = list(cmd.tps); ch = True
+                if cmd.tps and sane_tps(cmd.tps, rec.get("sl0") or rec.get("sl")) != rec.get("tps"): rec["tps"] = sane_tps(cmd.tps, rec.get("sl0") or rec.get("sl")); ch = True
             elif a == "MOVE_SL" and cmd.value is not None:
                 rec["sl"] = float(cmd.value); ch = True
             elif a == "MOVE_SL_BE" and rec["state"] in ("open", "watching"):

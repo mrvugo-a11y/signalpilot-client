@@ -25,6 +25,12 @@ class RMultiple(unittest.TestCase):
         self.assertEqual(out[0]["sl"], 95.0); self.assertEqual(out[0]["r"], 2.0)
 
 
+class SaneTps(unittest.TestCase):
+    def test_pip_style_tp_dropped(self):
+        self.assertEqual(T.sane_tps([1.0, 3540.0, None], 3527.0), [None, 3540.0, None])
+        self.assertEqual(T.sane_tps([3540.0], None), [3540.0])
+
+
 class FakeMT5:
     def __init__(self): self.alive = False; self.inits = 0
     def terminal_info(self): return types.SimpleNamespace(trade_allowed=True) if self.alive else None
