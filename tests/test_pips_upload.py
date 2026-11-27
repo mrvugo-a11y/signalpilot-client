@@ -67,7 +67,11 @@ class Endpoint(unittest.TestCase):
                          "https://signalpilot.vodsfire.co.za/api/channel-stats")
 
     def test_other_hosts_unchanged(self):
-        self.assertEqual(SH.endpoint({"licence_url": "https://site.example/api/licence"}), "https://site.example/api/channel-stats")
+        # the CI build fills in a built in licence address, which wins over the config; clear it for this test
+        from unittest import mock
+        from copier import app_credentials as AC
+        with mock.patch.object(AC, "LICENCE_URL", ""):
+            self.assertEqual(SH.endpoint({"licence_url": "https://site.example/api/licence"}), "https://site.example/api/channel-stats")
 
 
 class UploadCarriesPips(unittest.TestCase):
